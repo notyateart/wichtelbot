@@ -5,8 +5,9 @@ import random
 
 # Retrieve sensitive data from environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME")  # Admin is identified by their username
 
-# Dictionary to store groups {group_name: {user_id: name}}
+# Dictionary to store groups {group_name: {"creator_id": user_id, "members": {user_id: name}}}
 groups = {}
 
 # Dictionary to store the last active group for each user
@@ -17,14 +18,28 @@ WAITING_FOR_GROUP_NAME = range(1)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /start command: Welcomes the user."""
-    await update.message.reply_text(
-        "Willkommen beim Wichtelbot! 🎁\n"
-        "Erstelle eine neue Wichtelgruppe mit /create.\n"
-        "Tritt einer bestehenden Gruppe bei mit /join.\n"
-        "Zeige Teilnehmer mit /list.\n"
-        "Starte die Zuweisung mit /assign."
-    )
+    """Handles the /start command: Welcomes the user and shows available commands."""
+    user_username = update.message.from_user.username
+    if user_username == ADMIN_USERNAME:
+        await update.message.reply_text(
+            "Willkommen beim Wichtelbot! 🎁\n\n"
+            "Admin-Befehle:\n"
+            "/deleteall - Lösche alle Gruppen\n\n"
+            "Benutzer-Befehle:\n"
+            "/create - Erstelle eine neue Gruppe\n"
+            "/delete - Lösche eine Gruppe\n"
+            "/assign - Weise Teilnehmer zu\n"
+            "/join - Trete einer Gruppe bei\n"
+            "/list - Zeige Teilnehmer in der Gruppe"
+        )
+    else:
+        await update.message.reply_text(
+            "Willkommen beim Wichtelbot! 🎁\n\n"
+            "Verfügbare Befehle:\n"
+            "/create - Erstelle eine neue Gruppe\n"
+            "/join - Trete einer Gruppe bei\n"
+            "/list - Zeige Teilnehmer in der Gruppe"
+        )
 
 
 async def create_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -38,13 +53,48 @@ async def create_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         await update.message.reply_text("Eine Gruppe mit diesem Namen existiert bereits. Bitte wähle einen anderen Namen.")
         return ConversationHandler.END
 
-    groups[group_name] = {}  # Initialize an empty group
-    user_last_group[update.message.from_user.id] = group_name
+    user_id = update.message.from_user.id
+    groups[group_name] = {"creator_id": user_id, "members": {}}
+    user_last_group[user_id] = group_name
     await update.message.reply_text(
         f"Die Wichtelgruppe '{group_name}' wurde erstellt! 🎉\n"
-        "Wenn du teilnehmen möchtest, benutze /join, um der Gruppe beizutreten."
+        "Wenn du teilnehmen möchtest, benutze /join, um der Gruppe beizutreten.\n\n"
+        "Zusätzliche Befehle für dich:\n"
+        "/delete - Löscht die Gruppe\n"
+        "/assign - Weist alle Teilnehmer zu und schließt die Gruppe"
     )
     return ConversationHandler.END
+
+
+async def delete_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the /delete command: Deletes a group if the user is its creator."""
+    if len(context.args) < 1:
+        await update.message.reply_text("Bitte schicke mir den Gruppennamen:")
+        return WAITING_FOR_GROUP_NAME
+
+    group_name = " ".join(context.args)
+    if group_name not in groups:
+        await update.message.reply_text("Der angegebene Gruppenname ist ungültig.")
+        return ConversationHandler.END
+
+    user_id = update.message.from_user.id
+    if groups[group_name]["creator_id"] != user_id and update.message.from_user.username != ADMIN_USERNAME:
+        await update.message.reply_text("Du bist nicht der Ersteller dieser Gruppe und kannst sie daher nicht löschen.")
+        return ConversationHandler.END
+
+    del groups[group_name]
+    await update.message.reply_text(f"Die Gruppe '{group_name}' wurde erfolgreich gelöscht.")
+    return ConversationHandler.END
+
+
+async def delete_all_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the /deleteall command: Deletes all groups (Admin only)."""
+    if update.message.from_user.username != ADMIN_USERNAME:
+        await update.message.reply_text("Dieser Befehl ist nur für Admins verfügbar.")
+        return
+
+    groups.clear()
+    await update.message.reply_text("Alle Gruppen wurden erfolgreich gelöscht.")
 
 
 async def join_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -72,17 +122,17 @@ async def receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     """Receives the name from the user and adds them to the group."""
     group_name = context.user_data.get("joining_group")
     if not group_name or group_name not in groups:
-        await update.message.reply_text("Ein Fehler ist aufgetreten. Bitte starte den Beitritt erneut mit /join.")
+        await update.message.reply_text("Ein Fehler ist aufgetreten. Überprüfe ob der Gruppenname richtig ist und starte den Beitritt erneut mit /join.")
         return ConversationHandler.END
 
     user_id = update.message.from_user.id
     user_name = update.message.text
 
-    if user_id in groups[group_name]:
+    if user_id in groups[group_name]["members"]:
         await update.message.reply_text("Du bist bereits Mitglied dieser Gruppe.")
         return ConversationHandler.END
 
-    groups[group_name][user_id] = user_name
+    groups[group_name]["members"][user_id] = user_name
     user_last_group[user_id] = group_name
     await update.message.reply_text(f"Du bist der Gruppe '{group_name}' beigetreten! 🎉")
     return ConversationHandler.END
@@ -104,37 +154,37 @@ async def process_list_participants(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text("Der angegebene Gruppenname ist ungültig.")
         return ConversationHandler.END
 
-    if not groups[group_name]:
+    if not groups[group_name]["members"]:
         await update.message.reply_text("Es gibt noch keine Teilnehmer in dieser Gruppe.")
         return ConversationHandler.END
 
-    participant_list = "\n".join([f"{name}" for name in groups[group_name].values()])
+    participant_list = "\n".join([f"{name}" for name in groups[group_name]["members"].values()])
     await update.message.reply_text(f"Aktuelle Teilnehmer in Gruppe '{group_name}':\n{participant_list}")
     return ConversationHandler.END
 
 
 async def assign(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the /assign command: Randomly assigns participants to each other."""
+    """Handles the /assign command: Randomly assigns participants to each other if the user is the group's creator."""
     if len(context.args) < 1:
         await update.message.reply_text("Bitte schicke mir den Gruppennamen:")
         return WAITING_FOR_GROUP_NAME
 
     group_name = " ".join(context.args)
-    return await process_assign(update, context, group_name)
-
-
-async def process_assign(update: Update, context: ContextTypes.DEFAULT_TYPE, group_name: str) -> int:
-    """Processes the assignment of participants in a group."""
     if group_name not in groups:
         await update.message.reply_text("Der angegebene Gruppenname ist ungültig.")
         return ConversationHandler.END
 
-    if len(groups[group_name]) < 2:
+    user_id = update.message.from_user.id
+    if groups[group_name]["creator_id"] != user_id and update.message.from_user.username != ADMIN_USERNAME:
+        await update.message.reply_text("Du bist nicht der Ersteller dieser Gruppe und kannst sie daher nicht zuweisen.")
+        return ConversationHandler.END
+
+    if len(groups[group_name]["members"]) < 2:
         await update.message.reply_text("Es gibt nicht genug Teilnehmer, um Wichteln durchzuführen!")
         return ConversationHandler.END
 
-    user_ids = list(groups[group_name].keys())
-    names = list(groups[group_name].values())
+    user_ids = list(groups[group_name]["members"].keys())
+    names = list(groups[group_name]["members"].values())
 
     shuffled_names = names[:]
     random.shuffle(shuffled_names)
@@ -155,7 +205,7 @@ async def process_assign(update: Update, context: ContextTypes.DEFAULT_TYPE, gro
     for user_id, recipient in assignments.items():
         await context.bot.send_message(
             chat_id=user_id,
-            text=f"🎁 Du bist der Wichtel für {recipient}! Viel Spaß beim Besorgen des Geschenks!"
+            text=f"🎁 Wichtel wurden für Gruppe '{group_name}' zugewiesen!\nDu bist der Wichtel für {recipient}!\nViel Spaß beim Besorgen des Geschenks!"
         )
 
     # Notify admin and delete the group
@@ -168,8 +218,8 @@ async def process_assign(update: Update, context: ContextTypes.DEFAULT_TYPE, gro
 
 def main():
     """Main function to run the bot."""
-    if not BOT_TOKEN:
-        print("Fehler: BOT_TOKEN ist nicht gesetzt.")
+    if not BOT_TOKEN or not ADMIN_USERNAME:
+        print("Fehler: BOT_TOKEN oder ADMIN_USERNAME ist nicht gesetzt.")
         return
 
     application = Application.builder().token(BOT_TOKEN).build()
@@ -178,6 +228,8 @@ def main():
     group_name_handler = ConversationHandler(
         entry_points=[
             CommandHandler("create", create_group),
+            CommandHandler("delete", delete_group),
+            CommandHandler("deleteall", delete_all_groups),
             CommandHandler("join", join_group),
             CommandHandler("list", list_participants),
             CommandHandler("assign", assign),
