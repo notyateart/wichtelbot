@@ -1,5 +1,6 @@
 import os
 import json
+import random
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -53,6 +54,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     response += "👑 Gruppen-Ersteller:\n"
     response += "/create [Gruppenname] - Neue Gruppe erstellen\n"
     response += "/delete [Gruppenname] - Gruppe löschen\n"
+    response += "/assign - Wichtel zuweisen (Kreislogik)\n"
     response += "/restrict - Einschränkungen festlegen\n\n"
 
     # Admin section (only visible to admin user)
@@ -166,20 +168,8 @@ async def group_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"👥 Teilnehmer:\n{names}"
     )
 
-# Command: /preference
-async def set_preference(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.message.from_user.id
-    if not context.args:
-        await update.message.reply_text("⚠️ Bitte gib deine Vorlieben an. Beispiel: /preference Ich mag Bücher.")
-        return
-
-    preference = " ".join(context.args)
-    preferences[user_id] = preference
-    save_data(PREFERENCES_FILE, preferences)
-    await update.message.reply_text(f"✅ Deine Vorlieben wurden gespeichert: {preference}")
-
-# Command: /restrict
-async def set_restriction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# Command: /assign
+async def assign_circle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.message.from_user.id
 
     if user_id not in user_to_group:
@@ -188,28 +178,35 @@ async def set_restriction(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     group_name = user_to_group[user_id]
     if groups[group_name]["creator"] != user_id:
-        await update.message.reply_text("⚠️ Nur der Ersteller der Gruppe kann Einschränkungen festlegen.")
+        await update.message.reply_text("⚠️ Nur der Ersteller der Gruppe kann Teilnehmer zuweisen.")
         return
 
-    if len(context.args) < 3 or "cannot gift" not in " ".join(context.args).lower():
-        await update.message.reply_text(
-            "⚠️ Bitte gib Einschränkungen an. Beispiel: /restrict Max cannot gift Erika"
-        )
+    participants = list(groups[group_name]["participants"].values())
+    if len(participants) < 2:
+        await update.message.reply_text("⚠️ Es müssen mindestens 2 Teilnehmer in der Gruppe sein.")
         return
 
-    restrict_from = context.args[0]
-    restrict_to = context.args[-1]
+    # Shuffle participants for randomness
+    random.shuffle(participants)
 
-    if group_name not in restrictions:
-        restrictions[group_name] = {}
+    # Create the circular assignments
+    assignments = {participants[i]: participants[(i + 1) % len(participants)] for i in range(len(participants))}
 
-    if restrict_from not in restrictions[group_name]:
-        restrictions[group_name][restrict_from] = []
+    # Notify each participant of their assigned recipient
+    for user_id, name in groups[group_name]["participants"].items():
+        if name in assignments:
+            receiver = assignments[name]
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"🎄 Dein Wichtel ist: {receiver} 🎅"
+            )
 
-    restrictions[group_name][restrict_from].append(restrict_to)
-    save_data(RESTRICTIONS_FILE, restrictions)
+    # Delete the group after assignments
+    del groups[group_name]
+    del user_to_group[user_id]
+    save_data(GROUPS_FILE, groups)
     await update.message.reply_text(
-        f"✅ Einschränkung gespeichert: {restrict_from} kann {restrict_to} nicht beschenken."
+        f"✅ Wichtel wurden erfolgreich zugewiesen! 🎅 Die Gruppe '{group_name}' wurde gelöscht."
     )
 
 # Command: /showallgroups (Admin only)
@@ -249,8 +246,7 @@ def main() -> None:
     application.add_handler(CommandHandler("join", join_group))
     application.add_handler(CommandHandler("leave", leave_group))
     application.add_handler(CommandHandler("status", group_status))
-    application.add_handler(CommandHandler("preference", set_preference))
-    application.add_handler(CommandHandler("restrict", set_restriction))
+    application.add_handler(CommandHandler("assign", assign_circle))
     application.add_handler(CommandHandler("showallgroups", show_all_groups))
     application.add_handler(CommandHandler("deleteallgroups", delete_all_groups))
 
