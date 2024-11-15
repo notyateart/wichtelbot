@@ -10,9 +10,6 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME")  # Admin is identified by their use
 # Dictionary to store groups {group_name: {"creator_id": user_id, "members": {user_id: name}}}
 groups = {}
 
-# Dictionary to store the last active group for each user
-user_last_group = {}
-
 # Constants for conversation flow
 WAITING_FOR_GROUP_NAME = range(1)
 
@@ -46,16 +43,21 @@ async def create_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     """Handles the /create command: Creates a new group."""
     if len(context.args) < 1:
         await update.message.reply_text("Bitte schicke mir den Gruppennamen:")
+        context.user_data["command"] = "create"
         return WAITING_FOR_GROUP_NAME
 
     group_name = " ".join(context.args)
+    return await process_create_group(update, context, group_name)
+
+
+async def process_create_group(update: Update, context: ContextTypes.DEFAULT_TYPE, group_name: str) -> int:
+    """Processes the creation of a group."""
     if group_name in groups:
         await update.message.reply_text("Eine Gruppe mit diesem Namen existiert bereits. Bitte wähle einen anderen Namen.")
         return ConversationHandler.END
 
     user_id = update.message.from_user.id
     groups[group_name] = {"creator_id": user_id, "members": {}}
-    user_last_group[user_id] = group_name
     await update.message.reply_text(
         f"Die Wichtelgruppe '{group_name}' wurde erstellt! 🎉\n"
         "Wenn du teilnehmen möchtest, benutze /join, um der Gruppe beizutreten.\n\n"
@@ -66,13 +68,46 @@ async def create_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return ConversationHandler.END
 
 
+async def join_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the /join command: Allows a user to join a group."""
+    if len(context.args) < 1:
+        await update.message.reply_text("Bitte schicke mir den Gruppennamen:")
+        context.user_data["command"] = "join"
+        return WAITING_FOR_GROUP_NAME
+
+    group_name = " ".join(context.args)
+    return await process_join_group(update, context, group_name)
+
+
+async def process_join_group(update: Update, context: ContextTypes.DEFAULT_TYPE, group_name: str) -> int:
+    """Processes the joining of a group."""
+    if group_name not in groups:
+        await update.message.reply_text("Der angegebene Gruppenname ist ungültig.")
+        return ConversationHandler.END
+
+    user_id = update.message.from_user.id
+    if user_id in groups[group_name]["members"]:
+        await update.message.reply_text("Du bist bereits Mitglied dieser Gruppe.")
+        return ConversationHandler.END
+
+    groups[group_name]["members"][user_id] = update.message.from_user.first_name
+    await update.message.reply_text(f"Du bist der Gruppe '{group_name}' beigetreten! 🎉")
+    return ConversationHandler.END
+
+
 async def delete_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handles the /delete command: Deletes a group if the user is its creator."""
     if len(context.args) < 1:
         await update.message.reply_text("Bitte schicke mir den Gruppennamen:")
+        context.user_data["command"] = "delete"
         return WAITING_FOR_GROUP_NAME
 
     group_name = " ".join(context.args)
+    return await process_delete_group(update, context, group_name)
+
+
+async def process_delete_group(update: Update, context: ContextTypes.DEFAULT_TYPE, group_name: str) -> int:
+    """Processes the deletion of a group."""
     if group_name not in groups:
         await update.message.reply_text("Der angegebene Gruppenname ist ungültig.")
         return ConversationHandler.END
@@ -87,78 +122,48 @@ async def delete_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return ConversationHandler.END
 
 
-async def delete_all_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /deleteall command: Deletes all groups (Admin only)."""
-    if update.message.from_user.username != ADMIN_USERNAME:
-        await update.message.reply_text("Dieser Befehl ist nur für Admins verfügbar.")
-        return
-
-    groups.clear()
-    await update.message.reply_text("Alle Gruppen wurden erfolgreich gelöscht.")
-
-
-async def assign(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the /assign command: Randomly assigns participants to each other if the user is the group's creator."""
+async def list_participants(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the /list command: Lists all participants in a group."""
     if len(context.args) < 1:
         await update.message.reply_text("Bitte schicke mir den Gruppennamen:")
+        context.user_data["command"] = "list"
         return WAITING_FOR_GROUP_NAME
 
     group_name = " ".join(context.args)
+    return await process_list_participants(update, context, group_name)
+
+
+async def process_list_participants(update: Update, context: ContextTypes.DEFAULT_TYPE, group_name: str) -> int:
+    """Processes listing participants in a group."""
     if group_name not in groups:
         await update.message.reply_text("Der angegebene Gruppenname ist ungültig.")
         return ConversationHandler.END
 
-    user_id = update.message.from_user.id
-    if groups[group_name]["creator_id"] != user_id and update.message.from_user.username != ADMIN_USERNAME:
-        await update.message.reply_text("Du bist nicht der Ersteller dieser Gruppe und kannst sie daher nicht zuweisen.")
+    if not groups[group_name]["members"]:
+        await update.message.reply_text("Es gibt noch keine Teilnehmer in dieser Gruppe.")
         return ConversationHandler.END
 
-    if len(groups[group_name]["members"]) < 2:
-        await update.message.reply_text("Es gibt nicht genug Teilnehmer, um Wichteln durchzuführen!")
-        return ConversationHandler.END
-
-    user_ids = list(groups[group_name]["members"].keys())
-    names = list(groups[group_name]["members"].values())
-
-    shuffled_names = names[:]
-    random.shuffle(shuffled_names)
-
-    # Ensure no one gets themselves
-    while True:
-        valid = True
-        for i in range(len(names)):
-            if shuffled_names[i] == names[i]:
-                valid = False
-        if valid:
-            break
-        random.shuffle(shuffled_names)
-
-    assignments = {user_ids[i]: shuffled_names[i] for i in range(len(user_ids))}
-
-    # Notify participants of their assignments
-    for user_id, recipient in assignments.items():
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"🎁 Wichtel wurden für Gruppe '{group_name}' zugewiesen!\nDu bist der Wichtel für {recipient}!\nViel Spaß beim Besorgen des Geschenks!"
-        )
-
-    # Delete the group after assigning
-    del groups[group_name]
-    await update.message.reply_text(
-        f"Wichtel wurden für Gruppe '{group_name}' erfolgreich zugewiesen! Die Gruppe wurde gelöscht, und der Gruppenname ist wieder verfügbar."
-    )
+    participant_list = "\n".join([f"{name}" for name in groups[group_name]["members"].values()])
+    await update.message.reply_text(f"Aktuelle Teilnehmer in Gruppe '{group_name}':\n{participant_list}")
     return ConversationHandler.END
 
 
-async def process_join_group(update: Update, context: ContextTypes.DEFAULT_TYPE, group_name: str) -> int:
-    """Processes the joining of a group."""
-    if group_name not in groups:
-        await update.message.reply_text("Der angegebene Gruppenname ist ungültig.")
-        return ConversationHandler.END
+async def receive_group_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles input when waiting for a group name."""
+    group_name = update.message.text.strip()
+    command = context.user_data.get("command")
 
-    context.user_data["joining_group"] = group_name
-    await update.message.reply_text("Bitte gib deinen Namen ein, um der Gruppe beizutreten:")
-    return WAITING_FOR_GROUP_NAME
+    if command == "create":
+        return await process_create_group(update, context, group_name)
+    elif command == "join":
+        return await process_join_group(update, context, group_name)
+    elif command == "delete":
+        return await process_delete_group(update, context, group_name)
+    elif command == "list":
+        return await process_list_participants(update, context, group_name)
+    else:
+        await update.message.reply_text("Ein Fehler ist aufgetreten. Bitte starte erneut.")
+        return ConversationHandler.END
 
 
 def main():
@@ -173,13 +178,13 @@ def main():
     group_name_handler = ConversationHandler(
         entry_points=[
             CommandHandler("create", create_group),
+            CommandHandler("join", join_group),
             CommandHandler("delete", delete_group),
-            CommandHandler("deleteall", delete_all_groups),
-            CommandHandler("assign", assign),
+            CommandHandler("list", list_participants),
         ],
         states={
             WAITING_FOR_GROUP_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, process_join_group),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_group_name),
             ],
         },
         fallbacks=[],
