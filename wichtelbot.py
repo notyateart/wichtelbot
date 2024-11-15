@@ -17,7 +17,6 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME")
 # Persistent data file paths
 GROUPS_FILE = "groups.json"
 PREFERENCES_FILE = "preferences.json"
-RESTRICTIONS_FILE = "restrictions.json"
 
 # Load or initialize data
 def load_data(file_path, default):
@@ -32,11 +31,9 @@ def save_data(file_path, data):
 
 groups = load_data(GROUPS_FILE, {})
 preferences = load_data(PREFERENCES_FILE, {})
-restrictions = load_data(RESTRICTIONS_FILE, {})
 
 # Data structures
 user_to_group = {}  # Maps user IDs to their current group
-CONFIRM_DELETE = {}  # Temporary storage for delete confirmation state
 
 # Command: /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -48,14 +45,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     response += "/join [Gruppenname] - Einer Gruppe beitreten\n"
     response += "/leave - Gruppe verlassen\n"
     response += "/status - Gruppendetails anzeigen\n"
-    response += "/preference - Deine Vorlieben angeben\n\n"
+    response += "/preference - Deine Vorlieben angeben oder löschen\n\n"
 
     # Group creator section
     response += "👑 Gruppen-Ersteller:\n"
     response += "/create [Gruppenname] - Neue Gruppe erstellen\n"
     response += "/delete [Gruppenname] - Gruppe löschen\n"
-    response += "/assign - Wichtel zuweisen (Kreislogik)\n"
-    response += "/restrict - Einschränkungen festlegen\n\n"
+    response += "/assign - Wichtel zuweisen (Kreislogik)\n\n"
 
     # Admin section (only visible to admin user)
     if user.username == ADMIN_USERNAME:
@@ -168,6 +164,29 @@ async def group_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"👥 Teilnehmer:\n{names}"
     )
 
+# Command: /set-preference
+async def set_preference(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.message.from_user.id
+
+    # Save new preference
+    preference = " ".join(context.args)
+    preferences[user_id] = preference
+    save_data(PREFERENCES_FILE, preferences)
+    await update.message.reply_text(f"✅ Deine Vorlieben wurden gespeichert: {preference}")
+
+# Command: /delete-preference
+async def del_preference(update: Update, context: ContextTypes.DEFUAL_TYPE) -> None:
+    user_id = update.message.from_user.id
+
+    # Delete preference
+    if user_id in preferences:
+        del preferences[user_id]
+        save_data(PREFERENCES_FILE, preferences)
+        await update.message.reply_text("✅ Deine Vorlieben wurden gelöscht.")
+    else:
+        await update.message.reply_text("⚠️ Du hattest keine gespeicherten Vorlieben.")
+    return
+
 # Command: /assign
 async def assign_circle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.message.from_user.id
@@ -192,49 +211,46 @@ async def assign_circle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # Create the circular assignments
     assignments = {participants[i]: participants[(i + 1) % len(participants)] for i in range(len(participants))}
 
-    # Notify each participant of their assigned recipient
+    # Notify each participant of their assigned recipient and show preferences
     for user_id, name in groups[group_name]["participants"].items():
-        if name in assignments:
-            receiver = assignments[name]
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"🎄 Dein Wichtel ist: {receiver} 🎅"
-            )
+        receiver = assignments.get(name, "keinen")
+        preference = preferences.get(user_id, "Keine angegeben")
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"🎄 Dein Wichtel ist: {receiver} 🎅\n"
+                 f"🎁 Falls {receiver} Vorlieben angegeben hat siehst du sie hier:\n{preference}"
+                 f"\n\nDas Wichteln ist nun abgeschlossen. Viel Spaß beim Schenken!"
+        )
 
     # Delete the group after assignments
     del groups[group_name]
     del user_to_group[user_id]
     save_data(GROUPS_FILE, groups)
     await update.message.reply_text(
-        f"✅ Wichtel wurden erfolgreich zugewiesen! 🎅 Die Gruppe '{group_name}' wurde gelöscht."
+        f"✅ Wichtel wurden erfolgreich zugewiesen! \n🎅 Die Gruppe '{group_name}' wurde gelöscht."
     )
 
-# Command: /showallgroups (Admin only)
-async def show_all_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message.from_user.username != ADMIN_USERNAME:
-        await update.message.reply_text("⚠️ Nur der Admin kann diesen Befehl nutzen.")
-        return
+async def admin_show_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_name = update.message.from_user.name
 
-    if not groups:
-        await update.message.reply_text("⚠️ Es gibt keine Gruppen.")
-        return
+    if user_name == ADMIN_USERNAME:
+        group_list = ""
+        for group in groups:
+            group_list += group + " \n"
+        await update.message.reply_text(
+            f"Hier sind alle Gruppen: \n\n'{group_list}'"
+        )
 
-    response = "📋 Alle Gruppen:\n"
-    for group_name, details in groups.items():
-        response += f"- {group_name} ({len(details['participants'])} Teilnehmer)\n"
+async def admin_delete_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_name = update.message.from_user.name
 
-    await update.message.reply_text(response)
+    if user_name == ADMIN_USERNAME:
+        groups = {}
+        save_data(GROUPS_FILE, groups)
+        await update.message.reply_text(
+            f"Alle Gruppen wurden gelöscht."
+        )
 
-# Command: /deleteallgroups (Admin only)
-async def delete_all_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message.from_user.username != ADMIN_USERNAME:
-        await update.message.reply_text("⚠️ Nur der Admin kann diesen Befehl nutzen.")
-        return
-
-    groups.clear()
-    user_to_group.clear()
-    save_data(GROUPS_FILE, groups)
-    await update.message.reply_text("✅ Alle Gruppen wurden gelöscht.")
 
 # Main function to set up the bot
 def main() -> None:
@@ -246,9 +262,11 @@ def main() -> None:
     application.add_handler(CommandHandler("join", join_group))
     application.add_handler(CommandHandler("leave", leave_group))
     application.add_handler(CommandHandler("status", group_status))
+    application.add_handler(CommandHandler("set-preference", set_preference))
+    application.add_handler(CommandHandler("delete-preference", del_preference))
     application.add_handler(CommandHandler("assign", assign_circle))
-    application.add_handler(CommandHandler("showallgroups", show_all_groups))
-    application.add_handler(CommandHandler("deleteallgroups", delete_all_groups))
+    application.add_handler(CommandHandler("showallgroups", admin_show_groups))
+    application.add_handler(CommandHandler("deleteallgroups", admin_delete_groups))
 
     # Start the bot
     application.run_polling()
