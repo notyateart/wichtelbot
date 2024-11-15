@@ -1,2 +1,5 @@
 .venv
 .vscode
+groups.json
+preferences.json
+restrictions.json

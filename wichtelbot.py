@@ -1,232 +1,261 @@
 import os
+import json
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
-import random
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+)
 
-# Retrieve sensitive data from environment variables
+# Get environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME")  # Admin is identified by their username
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME")
 
-# Dictionary to store groups {group_name: {"creator_id": user_id, "members": {user_id: name}}}
-groups = {}
+# Persistent data file paths
+GROUPS_FILE = "groups.json"
+PREFERENCES_FILE = "preferences.json"
+RESTRICTIONS_FILE = "restrictions.json"
 
-# Dictionary to store the current group for each user {user_id: group_name}
-user_current_group = {}
+# Load or initialize data
+def load_data(file_path, default):
+    if os.path.exists(file_path):
+        with open(file_path, "r") as f:
+            return json.load(f)
+    return default
 
-# Constants for conversation flow
-WAITING_FOR_GROUP_NAME = range(1)
+def save_data(file_path, data):
+    with open(file_path, "w") as f:
+        json.dump(data, f, indent=4)
 
+groups = load_data(GROUPS_FILE, {})
+preferences = load_data(PREFERENCES_FILE, {})
+restrictions = load_data(RESTRICTIONS_FILE, {})
 
+# Data structures
+user_to_group = {}  # Maps user IDs to their current group
+CONFIRM_DELETE = {}  # Temporary storage for delete confirmation state
+
+# Command: /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /start command: Welcomes the user and shows available commands."""
-    user_username = update.message.from_user.username
-    if user_username == ADMIN_USERNAME:
-        await update.message.reply_text(
-            "Willkommen beim Wichtelbot! 🎁\n\n"
-            "Admin-Befehle:\n"
-            "/deleteall - Lösche alle Gruppen\n\n"
-            "Benutzer-Befehle:\n"
-            "/create - Erstelle eine neue Gruppe\n"
-            "/delete - Lösche eine Gruppe\n"
-            "/assign - Weise Teilnehmer zu\n"
-            "/join - Trete einer Gruppe bei\n"
-            "/leave - Verlasse eine Gruppe\n"
-            "/list - Zeige Teilnehmer in der Gruppe"
-        )
-    else:
-        await update.message.reply_text(
-            "Willkommen beim Wichtelbot! 🎁\n\n"
-            "Verfügbare Befehle:\n"
-            "/create - Erstelle eine neue Gruppe\n"
-            "/join - Trete einer Gruppe bei\n"
-            "/leave - Verlasse eine Gruppe\n"
-            "/list - Zeige Teilnehmer in der Gruppe"
-        )
+    user = update.message.from_user
+    response = "🎄 Willkommen beim Wichtel-Bot! Hier sind die verfügbaren Befehle:\n\n"
 
+    # Participant section
+    response += "👤 Teilnehmer:\n"
+    response += "/join [Gruppenname] - Einer Gruppe beitreten\n"
+    response += "/leave - Gruppe verlassen\n"
+    response += "/status - Gruppendetails anzeigen\n"
+    response += "/preference - Deine Vorlieben angeben\n\n"
 
-async def create_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the /create command: Creates a new group."""
-    if len(context.args) < 1:
-        await update.message.reply_text("Bitte schicke mir den Gruppennamen:")
-        context.user_data["command"] = "create"
-        return WAITING_FOR_GROUP_NAME
+    # Group creator section
+    response += "👑 Gruppen-Ersteller:\n"
+    response += "/create [Gruppenname] - Neue Gruppe erstellen\n"
+    response += "/delete [Gruppenname] - Gruppe löschen\n"
+    response += "/restrict - Einschränkungen festlegen\n\n"
 
-    group_name = " ".join(context.args)
-    return await process_create_group(update, context, group_name)
+    # Admin section (only visible to admin user)
+    if user.username == ADMIN_USERNAME:
+        response += "🔧 Admin:\n"
+        response += "/showallgroups - Alle Gruppen anzeigen\n"
+        response += "/deleteallgroups - Alle Gruppen löschen\n"
 
+    await update.message.reply_text(response)
 
-async def process_create_group(update: Update, context: ContextTypes.DEFAULT_TYPE, group_name: str) -> int:
-    """Processes the creation of a group."""
+# Command: /create
+async def create_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("⚠️ Bitte gib einen Gruppennamen an. Beispiel: /create MeineGruppe")
+        return
+
+    group_name = context.args[0]
     if group_name in groups:
-        await update.message.reply_text("Eine Gruppe mit diesem Namen existiert bereits. Bitte wähle einen anderen Namen.")
-        return ConversationHandler.END
-
-    user_id = update.message.from_user.id
-    if user_id in user_current_group:
-        await update.message.reply_text(
-            "Du bist bereits in einer Gruppe. Bitte verlasse deine aktuelle Gruppe mit /leave, um eine neue Gruppe zu erstellen."
-        )
-        return ConversationHandler.END
-
-    groups[group_name] = {"creator_id": user_id, "members": {user_id: update.message.from_user.first_name}}
-    user_current_group[user_id] = group_name
-    await update.message.reply_text(
-        f"Die Wichtelgruppe '{group_name}' wurde erstellt! 🎉\n"
-        "Wenn du teilnehmen möchtest, benutze /join, um der Gruppe beizutreten.\n\n"
-        "Zusätzliche Befehle für dich:\n"
-        "/delete - Löscht die Gruppe\n"
-        "/assign - Weist alle Teilnehmer zu und schließt die Gruppe"
-    )
-    return ConversationHandler.END
-
-
-async def join_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the /join command: Allows a user to join a group."""
-    if len(context.args) < 1:
-        await update.message.reply_text("Bitte schicke mir den Gruppennamen:")
-        context.user_data["command"] = "join"
-        return WAITING_FOR_GROUP_NAME
-
-    group_name = " ".join(context.args)
-    return await process_join_group(update, context, group_name)
-
-
-async def process_join_group(update: Update, context: ContextTypes.DEFAULT_TYPE, group_name: str) -> int:
-    """Processes the joining of a group."""
-    if group_name not in groups:
-        await update.message.reply_text("Der angegebene Gruppenname ist ungültig.")
-        return ConversationHandler.END
-
-    user_id = update.message.from_user.id
-    if user_id in user_current_group:
-        await update.message.reply_text(
-            f"Du bist bereits in der Gruppe '{user_current_group[user_id]}'. Bitte verlasse sie mit /leave, um einer neuen Gruppe beizutreten."
-        )
-        return ConversationHandler.END
-
-    groups[group_name]["members"][user_id] = update.message.from_user.first_name
-    user_current_group[user_id] = group_name
-    await update.message.reply_text(f"Du bist der Gruppe '{group_name}' beigetreten! 🎉")
-    return ConversationHandler.END
-
-
-async def leave_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /leave command: Allows a user to leave their current group."""
-    user_id = update.message.from_user.id
-    if user_id not in user_current_group:
-        await update.message.reply_text("Du bist derzeit in keiner Gruppe.")
+        await update.message.reply_text("⚠️ Diese Gruppe existiert bereits.")
         return
 
-    group_name = user_current_group.pop(user_id)
-    groups[group_name]["members"].pop(user_id)
+    groups[group_name] = {"creator": update.message.from_user.id, "participants": {}}
+    save_data(GROUPS_FILE, groups)
+    await update.message.reply_text(
+        f"✅ Gruppe '{group_name}' wurde erstellt!\n"
+        f"Nutze /join {group_name}, um der Gruppe beizutreten."
+    )
 
-    # Check if the group is empty and delete it
-    if not groups[group_name]["members"]:
-        del groups[group_name]
+# Command: /join
+async def join_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("⚠️ Bitte gib einen Gruppennamen an. Beispiel: /join MeineGruppe")
+        return
+
+    group_name = context.args[0]
+    user_id = update.message.from_user.id
+
+    if user_id in user_to_group:
+        current_group = user_to_group[user_id]
         await update.message.reply_text(
-            f"Die Gruppe '{group_name}' wurde gelöscht, da keine Mitglieder mehr vorhanden sind."
+            f"⚠️ Du bist bereits in der Gruppe '{current_group}'. Verlasse die aktuelle Gruppe mit /leave, bevor du einer neuen Gruppe beitrittst."
+        )
+        return
+
+    if group_name not in groups:
+        await update.message.reply_text("⚠️ Diese Gruppe existiert nicht.")
+        return
+
+    # Get the user's Telegram name
+    telegram_name = (
+        update.message.from_user.full_name
+        or update.message.from_user.first_name
+        or None
+    )
+
+    if telegram_name:
+        groups[group_name]["participants"][user_id] = telegram_name
+        user_to_group[user_id] = group_name
+        save_data(GROUPS_FILE, groups)
+        await update.message.reply_text(
+            f"✅ Du bist der Gruppe '{group_name}' als '{telegram_name}' beigetreten."
         )
     else:
-        await update.message.reply_text(f"Du hast die Gruppe '{group_name}' verlassen.")
+        await update.message.reply_text("🎅 Ich konnte deinen Namen nicht finden. Bitte sende mir deinen Namen:")
+        context.user_data["current_group"] = group_name
+        return 1  # Move to fallback state if name is unknown
 
-
-async def delete_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the /delete command: Deletes a group if the user is its creator."""
+# Command: /leave
+async def leave_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.message.from_user.id
-    group_name = user_current_group.get(user_id)
 
-    if not group_name or group_name not in groups:
-        await update.message.reply_text("Du hast keine Gruppe erstellt, die du löschen kannst.")
-        return ConversationHandler.END
-
-    if groups[group_name]["creator_id"] != user_id:
-        await update.message.reply_text("Du bist nicht der Ersteller dieser Gruppe und kannst sie daher nicht löschen.")
-        return ConversationHandler.END
-
-    del groups[group_name]
-    user_current_group.pop(user_id, None)
-
-    for member_id, member_group in list(user_current_group.items()):
-        if member_group == group_name:
-            user_current_group.pop(member_id)
-
-    await update.message.reply_text(f"Die Gruppe '{group_name}' wurde erfolgreich gelöscht.")
-    return ConversationHandler.END
-
-
-async def assign(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the /assign command: Randomly assigns participants to each other."""
-    user_id = update.message.from_user.id
-    group_name = user_current_group.get(user_id)
-
-    if not group_name or group_name not in groups:
-        await update.message.reply_text("Du hast keine Gruppe, der du Teilnehmer zuweisen kannst.")
-        return ConversationHandler.END
-
-    if groups[group_name]["creator_id"] != user_id:
-        await update.message.reply_text("Du bist nicht der Ersteller dieser Gruppe und kannst sie daher nicht zuweisen.")
-        return ConversationHandler.END
-
-    if len(groups[group_name]["members"]) < 2:
-        await update.message.reply_text("Es gibt nicht genug Teilnehmer, um Wichteln durchzuführen!")
-        return ConversationHandler.END
-
-    user_ids = list(groups[group_name]["members"].keys())
-    names = list(groups[group_name]["members"].values())
-
-    shuffled_names = names[:]
-    random.shuffle(shuffled_names)
-
-    # Ensure no one gets themselves
-    while True:
-        valid = True
-        for i in range(len(names)):
-            if shuffled_names[i] == names[i]:
-                valid = False
-        if valid:
-            break
-        random.shuffle(shuffled_names)
-
-    assignments = {user_ids[i]: shuffled_names[i] for i in range(len(user_ids))}
-
-    # Notify participants of their assignments
-    for user_id, recipient in assignments.items():
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"🎁 Wichtel wurden für Gruppe '{group_name}' zugewiesen!\nDu bist der Wichtel für {recipient}!\nViel Spaß beim Besorgen des Geschenks!"
-        )
-
-    # Delete the group after assigning
-    del groups[group_name]
-    for member_id in list(user_current_group.keys()):
-        if user_current_group[member_id] == group_name:
-            user_current_group.pop(member_id)
-
-    await update.message.reply_text(
-        f"Wichtel wurden für Gruppe '{group_name}' erfolgreich zugewiesen! Die Gruppe wurde gelöscht."
-    )
-    return ConversationHandler.END
-
-
-def main():
-    """Main function to run the bot."""
-    if not BOT_TOKEN or not ADMIN_USERNAME:
-        print("Fehler: BOT_TOKEN oder ADMIN_USERNAME ist nicht gesetzt.")
+    if user_id not in user_to_group:
+        await update.message.reply_text("⚠️ Du bist in keiner Gruppe.")
         return
 
+    group_name = user_to_group[user_id]
+    del groups[group_name]["participants"][user_id]
+    del user_to_group[user_id]
+
+    if not groups[group_name]["participants"]:
+        del groups[group_name]
+        save_data(GROUPS_FILE, groups)
+        await update.message.reply_text(
+            f"✅ Du hast die Gruppe '{group_name}' verlassen. "
+            "⚠️ Die Gruppe wurde gelöscht, da keine Teilnehmer mehr vorhanden sind."
+        )
+    else:
+        save_data(GROUPS_FILE, groups)
+        await update.message.reply_text(
+            f"✅ Du hast die Gruppe '{group_name}' verlassen."
+        )
+
+# Command: /status
+async def group_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.message.from_user.id
+
+    if user_id not in user_to_group:
+        await update.message.reply_text("⚠️ Du bist in keiner Gruppe.")
+        return
+
+    group_name = user_to_group[user_id]
+    participants = groups[group_name]["participants"]
+
+    if not participants:
+        await update.message.reply_text(f"⚠️ Die Gruppe '{group_name}' hat keine Teilnehmer.")
+        return
+
+    names = "\n".join(f"- {name}" for name in participants.values() if name)
+    await update.message.reply_text(
+        f"📜 Deine aktuelle Gruppe: '{group_name}'\n"
+        f"👥 Teilnehmer:\n{names}"
+    )
+
+# Command: /preference
+async def set_preference(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.message.from_user.id
+    if not context.args:
+        await update.message.reply_text("⚠️ Bitte gib deine Vorlieben an. Beispiel: /preference Ich mag Bücher.")
+        return
+
+    preference = " ".join(context.args)
+    preferences[user_id] = preference
+    save_data(PREFERENCES_FILE, preferences)
+    await update.message.reply_text(f"✅ Deine Vorlieben wurden gespeichert: {preference}")
+
+# Command: /restrict
+async def set_restriction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.message.from_user.id
+
+    if user_id not in user_to_group:
+        await update.message.reply_text("⚠️ Du bist in keiner Gruppe.")
+        return
+
+    group_name = user_to_group[user_id]
+    if groups[group_name]["creator"] != user_id:
+        await update.message.reply_text("⚠️ Nur der Ersteller der Gruppe kann Einschränkungen festlegen.")
+        return
+
+    if len(context.args) < 3 or "cannot gift" not in " ".join(context.args).lower():
+        await update.message.reply_text(
+            "⚠️ Bitte gib Einschränkungen an. Beispiel: /restrict Max cannot gift Erika"
+        )
+        return
+
+    restrict_from = context.args[0]
+    restrict_to = context.args[-1]
+
+    if group_name not in restrictions:
+        restrictions[group_name] = {}
+
+    if restrict_from not in restrictions[group_name]:
+        restrictions[group_name][restrict_from] = []
+
+    restrictions[group_name][restrict_from].append(restrict_to)
+    save_data(RESTRICTIONS_FILE, restrictions)
+    await update.message.reply_text(
+        f"✅ Einschränkung gespeichert: {restrict_from} kann {restrict_to} nicht beschenken."
+    )
+
+# Command: /showallgroups (Admin only)
+async def show_all_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message.from_user.username != ADMIN_USERNAME:
+        await update.message.reply_text("⚠️ Nur der Admin kann diesen Befehl nutzen.")
+        return
+
+    if not groups:
+        await update.message.reply_text("⚠️ Es gibt keine Gruppen.")
+        return
+
+    response = "📋 Alle Gruppen:\n"
+    for group_name, details in groups.items():
+        response += f"- {group_name} ({len(details['participants'])} Teilnehmer)\n"
+
+    await update.message.reply_text(response)
+
+# Command: /deleteallgroups (Admin only)
+async def delete_all_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message.from_user.username != ADMIN_USERNAME:
+        await update.message.reply_text("⚠️ Nur der Admin kann diesen Befehl nutzen.")
+        return
+
+    groups.clear()
+    user_to_group.clear()
+    save_data(GROUPS_FILE, groups)
+    await update.message.reply_text("✅ Alle Gruppen wurden gelöscht.")
+
+# Main function to set up the bot
+def main() -> None:
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Register command handlers
+    # Command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("create", create_group))
     application.add_handler(CommandHandler("join", join_group))
     application.add_handler(CommandHandler("leave", leave_group))
-    application.add_handler(CommandHandler("delete", delete_group))
-    application.add_handler(CommandHandler("assign", assign))
+    application.add_handler(CommandHandler("status", group_status))
+    application.add_handler(CommandHandler("preference", set_preference))
+    application.add_handler(CommandHandler("restrict", set_restriction))
+    application.add_handler(CommandHandler("showallgroups", show_all_groups))
+    application.add_handler(CommandHandler("deleteallgroups", delete_all_groups))
 
-    print("Bot wurde gestartet...")
+    # Start the bot
     application.run_polling()
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
