@@ -136,6 +136,7 @@ def reset_group(update: Update, context: CallbackContext) -> None:
 
 def main():
     """Hauptfunktion zum Ausführen des Bots."""
+    print("Bot wurde gestartet...")
     if not BOT_TOKEN or not ADMIN_ID:
         print("Fehler: BOT_TOKEN oder ADMIN_ID ist nicht gesetzt.")
         return
